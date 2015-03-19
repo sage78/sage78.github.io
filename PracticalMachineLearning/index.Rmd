@@ -1,0 +1,228 @@
+---
+title: "Write up on developing a ML algorithm to predict type of exercised 
+        sports"
+output: html_document
+---
+
+This is a write up for Coursera's course Practical Machine Learning. It 
+describes how a machine learning algorithm was developed to predict the 
+manner in which people did certain sports exercises by using sensor 
+data collected from devices such as Jawbone Up, Nike FuelBand and 
+Fitbit. More information about the source data is available at 
+http://groupware.les.inf.puc-rio.br/har (see the section on the 
+Weight Lifting Exercise Dataset). 
+
+Building the model included the following phases:
+
+- General settings
+- Reading data in and splitting it into train and test datasets
+- Transforming the training data
+- Training a machine learning algorithm by using training data
+- Estimating accuracy of the algorithm by using testing data
+- Testing the solution with provided test cases
+
+
+## General settings
+
+Prerequisites: pml-training.csv and pml-testing.csv source data files 
+are expected to be found from the working directory. These are available
+for download at Coursera site.
+
+Lets load required libraries and set seed to ensure reproducibility.
+
+```{r settings}
+library(caret)
+set.seed(12345)
+```
+
+
+## Reading data in and splitting it into train and test datasets
+
+Data used for developing an algorithm was provided in 
+pml-training.csv. The file contains several columns 
+with plenty of missing values. We treat 'NA', '#DIV/0!' 
+and empty values as missing ones. 
+
+After reading in the data, We split it in two parts randomly:
+
+- 80% of the data is used for training an algorithm (training) and 
+- 20% of the data is used for evaluating its accuracy (testing)
+
+```{r readdata}
+data <- read.csv("pml-training.csv", 
+                 header=TRUE, 
+                 na.strings=c("NA", "#DIV/0!", ""))
+inTrain <- createDataPartition(y=data$classe, p=0.8, list=FALSE)
+training <- data[inTrain,]
+testing <- data[-inTrain,]
+```
+
+Source data contains `r nrow(data)` rows and `r ncol(data)` columns in total.
+
+Though having little understanding on both weight lifting and used sensors, the
+dataset appears to have a lot of sensor readings, with each row related to
+certain sports exercise style described by a variable classe, which is 
+to be predicted. Defining which of the columns contain relevant data for 
+predicting classe was not obvious. 
+
+
+## Transforming the training data
+
+Training data contains `r nrow(training)` rows and `r ncol(training)` columns. 
+However, a brief study indicated that several columns contained mostly NA 
+values. In addition, columns 1-7 contained user information, time stamps, 
+windows etc which were not relevant, as time series based model was not 
+planned to be used. As a result, the following transformations were made:
+
+- remove columns 1-7
+- remove columns containing NA values
+- remove column with names starting as total_, as these compose data 
+  contained by other columns
+
+```{r transformdata}
+training <- training[-c(1:7)]
+training <- training[, apply(training, 2, function(x) !any(is.na(x)))] 
+training <- training[, -grep("^total_", colnames(training))]
+```
+
+After the transformations, training data contains `r nrow(training)` rows 
+and `r ncol(training)` columns. All columns are numeric or integer except 
+classe, which is factor and presents the manner in which the subject did 
+the exercise - it is to be predicted.
+
+nearZeroVar diagnose is used for detecting possible variables that have 
+one unique value (i.e. are zero variance predictors) and predictors that 
+are have both of the following characteristics: they have very few unique 
+values relative to the number of samples and the ratio of the frequency 
+of the most common value to the frequency of the second most common value 
+is large. It did not result in removing variables.
+
+```{r nearzerovar}
+nearZeroVar(training)
+```
+
+Correlated variables were identified in order to remove duplicate 
+information. The correlation level of interest was set to 0.9.
+
+```{r correlations}
+cors <- abs(cor(training[,-grep("classe", colnames(training))]))
+diag(cors) <- 0
+cors[cors < 0.9] <- NA
+cors <- cors[, apply(cors, 2, function(x) !all(is.na(x)))]
+cors <- cors[apply(cors, 1, function(x) !all(is.na(x))), ]
+cors
+```
+
+The following variables were found correlating and removed:
+
+- roll_belt correlates with accel_belt_y and accel_belt_z
+- pitch_belt correlates with accel_belt_x
+- gyros_dumbbell_x correlates with gyros_dumbbell_z and gyros_forearm_z
+- gyros_arm_x correlates with gyros_arm_y
+
+```{r removecorrelations}
+training <- training[,!(names(training) %in% c("accel_belt_y",
+                                               "accel_belt_z",
+                                               "accel_belt_x",
+                                               "gyros_dumbbell_z", 
+                                               "gyros_forearm_z",
+                                               "gyros_arm_y"))]
+```
+
+
+## Training a machine learning algorithm by using training data
+
+As a next step, we train a machine learning algorithm by using the training 
+data. Random forest seems like a good choice thanks to its accuracy.
+
+Lets use repeated k-fold cross validation, in which the process of 
+splitting the data into k-folds is repeated a number of times. The final 
+model accuracy is taken as the mean from the number of repeats. For the 
+sake of processing time, we use 3-fold cross validation with 3 repeats.
+
+```{r initialmodel}
+train_control <- trainControl(method="repeatedcv", number=3, repeats=3)
+model <- train(classe ~ ., 
+               data=training, 
+               trControl=train_control, 
+               method="rf", 
+               prox = TRUE)
+```
+
+This model is based on several variables, as we can also notice from varImpPlot, 
+which plots variable importance as measured by a random forest model.
+
+```{r varImpPlot}
+varImpPlot(model$finalModel)
+```
+
+To avoid overfitting, we reduce amount of predictor variables. We
+pick the 15 most important ones from the model developed above.
+
+```{r reducevariables}
+varImp <- varImp(model$finalModel)
+varImp <- rownames(varImp)[order(varImp$Overall, decreasing=TRUE)][1:15]
+training <- training[,(names(training) %in% c(varImp, "classe"))]
+```
+
+Now, we build the final model by using only these predictors
+```{r finalmodel}
+train_control2 <- trainControl(method="repeatedcv", number=3, repeats=3)
+model2 <- train(classe ~ ., 
+                data=training, 
+                trControl=train_control2, 
+                method="rf", 
+                prox = TRUE)
+```
+
+The resulting model is summarized below. OOB estimate of error rate is 1,05%.
+```{r summarizefinalmodel}
+print(model2)
+print(model2$finalModel)
+```
+
+
+## Estimating accuracy of the algorithm by using testing data
+
+We estimate accuracy of the model by using testing data, which was
+not used when training the model and use it for estimating the
+out of sample error. The real out of sample error is likely to be 
+slightly higher.
+
+```{r estimate}
+predict <- predict(model2, newdata=testing)
+confusionMatrix(predict, testing$classe)
+```
+
+As a conclusion, the model seem to perform rather accurately, having 
+accuracy 0.9898, Kappa 0.9871 and sensitivity and specificity for all 
+classes classes higher than 0.9789.
+
+We have tried to minimize risk of overfitting by reducing amount 
+of variables used in the model.
+
+The effect of reducing more variables and using other algortihms
+could be studied further.
+
+
+## Testing the solution with provided test cases
+
+20 test cases were provided for testing the developed algorithm. The
+following code was used for generating the results submitted for grading.
+20/20 score was achieved.
+
+```{r test}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+testdata <- read.csv("pml-testing.csv", 
+                     header=TRUE, 
+                     na.strings=c("NA", "#DIV/0!", ""))
+answers <- predict(model2, newdata=testdata)
+pml_write_files(answers)
+```
